@@ -19,8 +19,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"net/http"
+	"path"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/dgraph-io/dgo/v2"
@@ -28,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
+	"github.com/dgraph-io/dgraph/chunker"
 	"github.com/dgraph-io/dgraph/testutil"
 )
 
@@ -55,6 +60,35 @@ func sendRestoreRequest(t *testing.T) {
 	require.Contains(t, string(buf), "Restore completed.")
 }
 
+func runQueries(t *testing.T, dg *dgo.Dgraph) {
+	_, thisFile, _, _ := runtime.Caller(0)
+	queryDir := path.Join(path.Dir(thisFile), "queries")
+
+	files, err := ioutil.ReadDir(queryDir)
+	require.NoError(t, err)
+
+	for _, file := range files {
+		if !strings.HasPrefix(file.Name(), "query-") {
+			continue
+		}
+		t.Run(file.Name(), func(t *testing.T) {
+			filename := path.Join(queryDir, file.Name())
+			reader, cleanup := chunker.FileReader(filename)
+			bytes, err := ioutil.ReadAll(reader)
+			require.NoError(t, err)
+			contents := string(bytes[:])
+			cleanup()
+
+			// The test query and expected result are separated by a delimiter.
+			bodies := strings.SplitN(contents, "\n---\n", 2)
+
+			fmt.Printf("query :%s\n", bodies[0])
+			resp, err := dg.NewTxn().Query(context.Background(), bodies[0])
+			require.True(t, testutil.EqualJSON(t, bodies[1], string(resp.GetJson()), "", true))
+		})
+	}
+}
+
 func TestBasicRestore(t *testing.T) {
 	conn, err := grpc.Dial(testutil.SockAddr, grpc.WithInsecure())
 	require.NoError(t, err)
@@ -64,4 +98,5 @@ func TestBasicRestore(t *testing.T) {
 	require.NoError(t, dg.Alter(ctx, &api.Operation{DropAll: true}))
 
 	sendRestoreRequest(t)
+	runQueries(t, dg)
 }
