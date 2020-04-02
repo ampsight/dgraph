@@ -56,12 +56,16 @@ func ProcessRestoreRequest(ctx context.Context, req *pb.RestoreRequest) error {
 	}
 	req.RestoreTs = State.GetTimestamp(false)
 
-	cancelCtx, cancel := context.WithCancel(ctx)
+	// TODO: prevent partial restores when proposeRestoreOrSend only sends the restore
+	// request to a subset of groups.
 	for _, gid := range currentGroups {
 		reqCopy := proto.Clone(req).(*pb.RestoreRequest)
 		reqCopy.GroupId = gid
-		if err := proposeRestoreOrSend(cancelCtx, reqCopy); err != nil {
-			cancel()
+		if err := proposeRestoreOrSend(ctx, reqCopy); err != nil {
+			// In case of an error, return but don't cancel the context.
+			// After the timeout expires, the Done channel will be closed.
+			// If the channel is closed due to a deadline issue, we can
+			// ignore the requests for the groups that did not error out.
 			return err
 		}
 	}
@@ -89,8 +93,6 @@ func proposeRestoreOrSend(ctx context.Context, req *pb.RestoreRequest) error {
 // Restore implements the Worker interface.
 func (w *grpcWorker) Restore(ctx context.Context, req *pb.RestoreRequest) (*pb.Status, error) {
 	var emptyRes pb.Status
-	// TODO: add tracing to backup and restore operations.
-
 	if !groups().ServesGroup(req.GroupId) {
 		return &emptyRes, errors.Errorf("this server doesn't serve group id: %v", req.GroupId)
 	}
@@ -171,11 +173,12 @@ func handleRestoreProposal(ctx context.Context, req *pb.RestoreRequest) error {
 
 	// Propose a snapshot immediately after all the work is done to prevent the restore
 	// from being replayed.
-	if err := groups().Node.proposeSnapshot(0); err != nil {
+	if err := groups().Node.proposeSnapshot(1); err != nil {
 		return err
 	}
 
-	return nil
+	// Update the membership state to re-compute the group checksums.
+	return UpdateMembershipState(ctx)
 }
 
 func writeBackup(ctx context.Context, req *pb.RestoreRequest) error {

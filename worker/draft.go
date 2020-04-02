@@ -565,7 +565,17 @@ func (n *node) applyCommitted(proposal *pb.Proposal) error {
 		return nil
 
 	case proposal.Restore != nil:
-		return handleRestoreProposal(ctx, proposal.Restore)
+		if err := handleRestoreProposal(ctx, proposal.Restore); err != nil {
+			return err
+		}
+
+		// Call commitOrAbort to update the group checksums.
+		ts := proposal.Restore.RestoreTs
+		return n.commitOrAbort(proposal.Key, &pb.OracleDelta{
+			Txns: []*pb.TxnStatus{
+				{StartTs: ts, CommitTs: ts},
+			},
+		})
 	}
 	x.Fatalf("Unknown proposal: %+v", proposal)
 	return nil
